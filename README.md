@@ -21,18 +21,20 @@ Requires Node.js 24+, npm, an AWS account and deployment credentials. CDK depend
 
 ```sh
 npm ci
-npm run configure -- my-monorepo
+npm run configure -- my-monorepo eu-west-1 # optional region; defaults to us-east-1
 export AWS_REGION=us-east-1
 export AWS_PROFILE=your-profile
 aws sso login --profile "$AWS_PROFILE" # if using SSO
 npm run build
 # Once per AWS account/region; replace YOUR_ACCOUNT_ID:
 npm run bootstrap -- aws://YOUR_ACCOUNT_ID/us-east-1
+# Also bootstrap the bucket region if different (eu-west-1 in this example):
+npm run bootstrap -- aws://YOUR_ACCOUNT_ID/eu-west-1
 npm run plan
 npm run deploy
 ```
 
-The CDK app uses native `Bucket`, `Distribution`, `S3BucketOrigin.withOriginAccessControl` and `EdgeFunction` constructs. CDK synthesizes and deploys CloudFormation, including versioned edge associations and separate execution roles for signing downloads and handling upload responses. The stack is intentionally in **us-east-1**, as required by Lambda@Edge. CloudFront is global; the bucket is in us-east-1 too. First deployment and updates can take several minutes to propagate.
+The CDK app uses native `Bucket`, `Distribution`, `S3BucketOrigin.withOriginAccessControl` and `EdgeFunction` constructs. CDK synthesizes and deploys CloudFormation, including versioned edge associations and separate execution roles for signing downloads and handling upload responses. The edge stack is always in **us-east-1**, as required by Lambda@Edge. CloudFront is global. Set `bucketRegion` to place storage near your CI runners; the default is `us-east-1`. For another region, the app creates an additional regional storage stack. `deploy`, `plan`, `synth` and `destroy` operate on all stacks, with storage deployed before the edge stack. First deployment and updates can take several minutes to propagate.
 
 `configure` creates two gitignored files with mode `0600`:
 
@@ -41,7 +43,7 @@ The CDK app uses native `Bucket`, `Distribution`, `S3BucketOrigin.withOriginAcce
 
 The command refuses to overwrite existing files. Read the token file locally to configure your secret manager. The deployment credentials need CloudFormation, S3, CloudFront, IAM and Lambda permissions, including `iam:PassRole` and Lambda@Edge replication/service-linked-role permissions. They are deployment credentials, never credentials used by Nx clients.
 
-CloudFormation holds deployment state in AWS. `cdk.out/` contains generated templates and assembly files and is gitignored. The included GitHub workflow runs checks and synthesizes the stack offline; it does not deploy or require AWS credentials. `npm run synth` emits the CDK assembly; `npm run build` also writes a standalone template to `dist/cloudformation.json`.
+CloudFormation holds deployment state in AWS. `cdk.out/` contains generated templates and assembly files and is gitignored. The included GitHub workflow runs checks and synthesizes the stack offline; it does not deploy or require AWS credentials. `npm run synth` emits the CDK assembly; `npm run build` also writes one template per stack to `dist/templates/*.template.json`.
 
 Earlier Alchemy deployments are not automatically adopted by this CDK app. If you deployed that version, preserve its `.alchemy/` state, deploy the CDK stack separately, switch Nx to the new endpoint, and retire the old deployment using its original configuration.
 
@@ -74,11 +76,18 @@ Example `cache.config.json` shape (replace digests with hashes of independently 
       "readOnlyTokenSha256": "<64 lowercase hex characters>"
     }
   ],
+  "bucketRegion": "eu-west-1",
   "retentionDays": 30,
   "maxArtifactBytes": 1073741824,
   "signedUrlTtlSeconds": 300
 }
 ```
+
+`bucketRegion` accepts commercial AWS region names (for example `eu-west-1`, `eu-central-1` or `us-west-2`). The region must be enabled in your account. Set it in `cache.config.json`; `AWS_REGION` does not override bucket placement. Existing configs without this field keep their original single-stack `us-east-1` placement and resource IDs.
+
+For other regions, the storage stack owns the bucket and lifecycle rules. The edge stack imports its account/region-specific name and owns its sole bucket policy; CloudFormation [supports cross-region S3 bucket policy management from us-east-1](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-s3-bucketpolicy.html). This avoids cross-region exports and custom lookup functions. Both stacks use the same AWS account.
+
+Changing `bucketRegion` switches to a different bucket: existing artifacts are not migrated, and the new location starts with cache misses. Old buckets are retained. Previously deployed regional storage stacks are not automatically destroyed when removed from the app; retire them explicitly after the switch if desired. The CloudFront URL stays the same.
 
 Each repository must have unique tokens and a unique namespace. The authenticated token selects the namespace; a caller cannot choose another namespace in the URL. Objects are stored at `cache/{namespace}/{hash}`. More repositories enlarge the embedded function configuration. CDK handles CloudFormation template publishing; AWS template and Lambda code-size quotas still apply.
 
@@ -125,7 +134,7 @@ export AWS_REGION=us-east-1
 npm run destroy
 ```
 
-The distribution, OAC and bucket policy are removed. **The bucket, edge functions, published versions, execution roles and their inline IAM policies are deliberately retained**, because cache data should not be silently deleted and AWS does not allow deleting Lambda@Edge versions while replicas exist. Function CloudWatch logs may also remain in execution regions. After detaching the distribution and waiting for replicas to disappear, remove these resources manually if desired. Save deployment outputs before destroying. Retained buckets incur storage charges until empty or deleted; their lifecycle rules continue expiring artifacts. Recreating a stack creates new resources rather than adopting the retained ones.
+All stacks in the current configuration are selected, with the edge stack removed before regional storage. The distribution, OAC and bucket policy are removed. **The bucket, edge functions, published versions, execution roles and their inline IAM policies are deliberately retained**, because cache data should not be silently deleted and AWS does not allow deleting Lambda@Edge versions while replicas exist. Function CloudWatch logs may also remain in execution regions. After detaching the distribution and waiting for replicas to disappear, remove these resources manually if desired. Save deployment outputs before destroying. Retained buckets incur storage charges until empty or deleted; their lifecycle rules continue expiring artifacts. Recreating a stack creates new resources rather than adopting the retained ones.
 
 ## References
 

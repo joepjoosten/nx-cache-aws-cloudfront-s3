@@ -37,7 +37,7 @@ export async function bundleEdgeHandlers(
       __EDGE_CONFIG__: JSON.stringify({
         ...config,
         bucketName: BUCKET_PLACEHOLDER,
-        region: "us-east-1",
+        region: config.bucketRegion,
       }),
     }),
     bundle("src/edge/origin-response.ts"),

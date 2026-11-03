@@ -18,6 +18,7 @@ import { BUCKET_PLACEHOLDER, type EdgeBundles } from "./bundle.ts";
 export interface CacheStackProps extends StackProps {
   config: CacheConfig;
   bundles: EdgeBundles;
+  regionalBucketName?: string;
 }
 
 export class CacheStack extends Stack {
@@ -25,21 +26,55 @@ export class CacheStack extends Stack {
     super(scope, id, props);
     if (this.region !== "us-east-1")
       throw new Error("Deploy this stack in us-east-1 for Lambda@Edge");
-    const bucket = new s3.Bucket(this, "CacheBucket", {
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      enforceSSL: true,
-      removalPolicy: RemovalPolicy.RETAIN,
-      lifecycleRules: [
-        {
-          id: "ExpireArtifacts",
-          prefix: "cache/",
-          expiration: Duration.days(props.config.retentionDays),
-          abortIncompleteMultipartUploadAfter: Duration.days(1),
-        },
-      ],
-    });
+    // Preserve the existing single-stack bucket and its logical ID by default.
+    // In other regions use an explicit name shared by both stacks, without a
+    // cross-region CloudFormation resource reference or a dependency cycle.
+    if (
+      props.config.bucketRegion !== "us-east-1" &&
+      !props.regionalBucketName
+    ) {
+      throw new Error(
+        "A regional storage bucket is required outside us-east-1",
+      );
+    }
+    const bucket = props.regionalBucketName
+      ? s3.Bucket.fromBucketAttributes(this, "RegionalCacheBucket", {
+          bucketName: props.regionalBucketName,
+          region: props.config.bucketRegion,
+        })
+      : new s3.Bucket(this, "CacheBucket", {
+          blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+          objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+          encryption: s3.BucketEncryption.S3_MANAGED,
+          enforceSSL: true,
+          removalPolicy: RemovalPolicy.RETAIN,
+          lifecycleRules: [
+            {
+              id: "ExpireArtifacts",
+              prefix: "cache/",
+              expiration: Duration.days(props.config.retentionDays),
+              abortIncompleteMultipartUploadAfter: Duration.days(1),
+            },
+          ],
+        });
+    if (props.regionalBucketName) {
+      // CloudFormation explicitly supports cross-region S3 BucketPolicy
+      // management from us-east-1. Keep the policy next to the distribution
+      // so its ARN is local, without cross-region exports/custom resources.
+      bucket.policy = new s3.BucketPolicy(this, "RegionalBucketPolicy", {
+        bucket,
+      });
+      bucket.addToResourcePolicy(
+        new iam.PolicyStatement({
+          sid: "RequireTLS",
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ["s3:*"],
+          resources: [bucket.bucketArn, bucket.arnForObjects("*")],
+          conditions: { Bool: { "aws:SecureTransport": "false" } },
+        }),
+      );
+    }
     // CDK's OAC origin grants writes to the distribution. Explicitly deny
     // non-conditional writes as well, so neither that grant nor another IAM
     // Allow can bypass write-once semantics for cache objects.
@@ -179,6 +214,7 @@ export class CacheStack extends Stack {
       value: `https://${distribution.distributionDomainName}`,
     });
     new CfnOutput(this, "BucketName", { value: bucket.bucketName });
+    new CfnOutput(this, "BucketRegion", { value: props.config.bucketRegion });
     new CfnOutput(this, "DistributionId", {
       value: distribution.distributionId,
     });

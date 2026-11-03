@@ -7,14 +7,14 @@
     "configure": "tsx scripts/configure.ts",
     "build": "tsx scripts/build.ts",
     "typecheck": "tsc --noEmit",
-    "deploy": "cdk deploy",
-    "plan": "cdk diff",
-    "destroy": "cdk destroy",
+    "deploy": "cdk deploy --all",
+    "plan": "cdk diff '**'",
+    "destroy": "cdk destroy --all",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "smoke": "tsx scripts/smoke.ts",
     "check": "npm run typecheck && npm test && npm run format:check",
-    "synth": "cdk synth",
+    "synth": "cdk synth '**'",
     "bootstrap": "cdk bootstrap"
   },
   "keywords": [

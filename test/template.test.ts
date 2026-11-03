@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createContext, runInContext } from "node:vm";
 import { test } from "node:test";
+import { createRequire } from "node:module";
+import { S3Client } from "@aws-sdk/client-s3";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { parseConfig } from "../src/config.ts";
 import { createCacheApp } from "../src/infra/app.ts";
@@ -13,6 +15,145 @@ const config = parseConfig({
       readOnlyTokenSha256: "b".repeat(64),
     },
   ],
+});
+
+test("regional storage has one policy owner, a regional origin and correct download signatures", async () => {
+  const { app, stack, storageStack } = await createCacheApp(
+    { ...config, bucketRegion: "eu-west-1" },
+    { account: "111111111111" },
+  );
+  assert.ok(storageStack);
+  assert.equal(stack.region, "us-east-1");
+  assert.equal(storageStack.region, "eu-west-1");
+  const edge = Template.fromStack(stack);
+  const storage = Template.fromStack(storageStack);
+  edge.resourceCountIs("AWS::S3::Bucket", 0);
+  edge.resourceCountIs("AWS::S3::BucketPolicy", 1);
+  edge.resourceCountIs("AWS::Lambda::Function", 2);
+  storage.resourceCountIs("AWS::S3::Bucket", 1);
+  storage.resourceCountIs("AWS::S3::BucketPolicy", 0);
+  storage.resourceCountIs("AWS::Lambda::Function", 0);
+  storage.hasResource("AWS::S3::Bucket", { DeletionPolicy: "Retain" });
+  edge.hasResourceProperties("AWS::S3::BucketPolicy", {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Sid: "RequireTLS",
+          Effect: "Deny",
+          Condition: { Bool: { "aws:SecureTransport": "false" } },
+        }),
+        Match.objectLike({
+          Sid: "RequireWriteOnce",
+          Effect: "Deny",
+          Condition: { StringNotEquals: { "s3:if-none-match": "*" } },
+        }),
+        Match.objectLike({
+          Effect: "Allow",
+          Principal: { Service: "cloudfront.amazonaws.com" },
+          Action: "s3:PutObject",
+        }),
+      ]),
+    },
+  });
+  const bucket = Object.values(storage.findResources("AWS::S3::Bucket"))[0];
+  const bucketName = bucket.Properties.BucketName;
+  const distribution = Object.values(
+    edge.findResources("AWS::CloudFront::Distribution"),
+  )[0];
+  assert.ok(
+    JSON.stringify(distribution.Properties.DistributionConfig.Origins).includes(
+      "s3.eu-west-1.",
+    ),
+  );
+  const policy = Object.values(edge.findResources("AWS::S3::BucketPolicy"))[0];
+  assert.equal(policy.Properties.Bucket, bucketName);
+
+  // Execute the actual bundled handler with the real AWS presigner and fake
+  // static signing credentials: no AWS account/network access is required.
+  const viewer = Object.entries(
+    edge.findResources("AWS::Lambda::Function"),
+  ).find(([id]) => id.startsWith("ViewerFunction"))![1];
+  const source = viewer.Properties.Code.ZipFile;
+  assert.equal(typeof source, "string");
+  const token = "regional-signing-test-token-".repeat(3);
+  const require = createRequire(import.meta.url);
+  const { createHash } = require("node:crypto");
+  const digest = createHash("sha256").update(token).digest("hex");
+  const module = { exports: {} as { handler: Function } };
+  class TestS3Client extends S3Client {
+    constructor(options: ConstructorParameters<typeof S3Client>[0]) {
+      super({
+        ...options,
+        credentials: {
+          accessKeyId: "test-access-key",
+          secretAccessKey: "test-secret-key",
+        },
+      });
+    }
+  }
+  runInContext(
+    source.replace("a".repeat(64), digest),
+    createContext({
+      module,
+      exports: module.exports,
+      Buffer,
+      require: (name: string) =>
+        name === "@aws-sdk/client-s3"
+          ? { ...require(name), S3Client: TestS3Client }
+          : require(name),
+    }),
+  );
+  const result = await module.exports.handler({
+    Records: [
+      {
+        cf: {
+          request: {
+            method: "GET",
+            uri: "/v1/cache/12345",
+            querystring: "",
+            headers: { authorization: [{ value: `Bearer ${token}` }] },
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(result.status, "302");
+  const url = new URL(result.headers.location[0].value);
+  assert.equal(url.hostname, `${bucketName}.s3.eu-west-1.amazonaws.com`);
+  assert.ok(
+    url.searchParams
+      .get("X-Amz-Credential")
+      ?.includes("/eu-west-1/s3/aws4_request"),
+  );
+
+  const assembly = app.synth();
+  const edgeArtifact = assembly.getStackArtifact(stack.artifactId);
+  assert.ok(
+    edgeArtifact.dependencies.some(
+      (dependency) => dependency.id === storageStack.artifactId,
+    ),
+  );
+  assert.ok(
+    !assembly
+      .getStackArtifact(storageStack.artifactId)
+      .dependencies.some((dependency) => dependency.id === stack.artifactId),
+  );
+});
+
+test("default placement preserves the original bucket and distribution logical IDs", async () => {
+  const { stack, storageStack } = await createCacheApp(config, {
+    account: "111111111111",
+  });
+  assert.equal(storageStack, undefined);
+  const template = Template.fromStack(stack);
+  assert.equal(
+    Object.keys(template.findResources("AWS::S3::Bucket"))[0],
+    "CacheBucket41D9D0B0",
+  );
+  assert.equal(
+    Object.keys(template.findResources("AWS::CloudFront::Distribution"))[0],
+    "Distribution830FAC52",
+  );
 });
 async function synth(ttl = config.signedUrlTtlSeconds) {
   const { stack } = await createCacheApp(

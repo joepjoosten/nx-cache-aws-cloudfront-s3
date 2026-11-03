@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { loadConfig } from "../src/config.ts";
+
+const config = loadConfig();
 
 const base = process.env.NX_SELF_HOSTED_REMOTE_CACHE_SERVER;
 if (!base || new URL(base).protocol !== "https:")
@@ -69,7 +72,10 @@ const redirect = await request(url, {
 assert.equal(redirect.status, 302);
 assert.equal(redirect.headers.get("cache-control"), "no-store");
 const target = new URL(redirect.headers.get("location")!);
-assert.equal(target.hostname.endsWith(".s3.us-east-1.amazonaws.com"), true);
+assert.equal(
+  target.hostname.endsWith(`.s3.${config.bucketRegion}.amazonaws.com`),
+  true,
+);
 // Fetch S3 without the Nx bearer header; also exercise automatic cross-host redirects below.
 const download = await request(target.toString());
 assert.equal(download.status, 200);

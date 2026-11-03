@@ -7,6 +7,7 @@ export interface Repository {
 }
 
 export interface CacheConfig {
+  bucketRegion: string;
   repositories: Repository[];
   retentionDays: number;
   maxArtifactBytes: number;
@@ -22,6 +23,19 @@ export function parseConfig(value: unknown): CacheConfig {
   if (!value || typeof value !== "object")
     throw new Error("Expected a cache config object");
   const input = value as Record<string, unknown>;
+  const bucketRegion = input.bucketRegion ?? "us-east-1";
+  // CloudFront/Lambda@Edge and this app use the commercial AWS partition.
+  // Validate the name shape, leaving region availability/opt-in to AWS.
+  if (
+    typeof bucketRegion !== "string" ||
+    !/^(af|ap|ca|eu|il|me|mx|sa|us)-(central|east|north|northeast|northwest|south|southeast|southwest|west)-[1-9][0-9]*$/.test(
+      bucketRegion,
+    )
+  ) {
+    throw new Error(
+      "bucketRegion must be a commercial AWS region name, e.g. eu-west-1",
+    );
+  }
   if (!Array.isArray(input.repositories) || !input.repositories.length) {
     throw new Error("Configure at least one repository");
   }
@@ -79,6 +93,7 @@ export function parseConfig(value: unknown): CacheConfig {
     return value;
   }
   return {
+    bucketRegion,
     repositories,
     retentionDays: integer("retentionDays", 30, 1, 365),
     maxArtifactBytes: integer("maxArtifactBytes", 1024 ** 3, 1, 5_000_000_000),

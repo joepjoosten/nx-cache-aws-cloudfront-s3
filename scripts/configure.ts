@@ -13,6 +13,7 @@ const readOnlyToken = randomBytes(32).toString("hex");
 const hash = (token: string) =>
   createHash("sha256").update(token).digest("hex");
 const config = parseConfig({
+  bucketRegion: process.argv[3],
   repositories: [
     {
       namespace,
