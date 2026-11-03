@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.alchemy/
+.env
+.env.*
+!.env.example
+cache.config.json
+cache.tokens.json
+.DS_Store
