@@ -1,0 +1,3 @@
+# CDK deliberately emits explicit IAM role dependencies alongside Role GetAtt.
+ignore_checks:
+  - W3005

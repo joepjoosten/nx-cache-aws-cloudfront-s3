@@ -1,6 +1,6 @@
 # Nx cache on AWS CloudFront + S3
 
-A self-hosted Nx remote cache deployed with [Alchemy](https://github.com/alchemy-run/alchemy). Uploads pass through CloudFront directly to a private S3 bucket. Downloads redirect to short-lived presigned S3 URLs. No artifact body passes through API Gateway or Lambda.
+A self-hosted Nx remote cache deployed with [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html). Uploads pass through CloudFront directly to a private S3 bucket. Downloads redirect to short-lived presigned S3 URLs. No artifact body passes through API Gateway or Lambda.
 
 ```text
 Upload:   Nx ──PUT──▶ CloudFront ──OAC-signed PUT──▶ S3
@@ -17,7 +17,7 @@ The edge handlers implement Nx's `GET /v1/cache/{hash}` and `PUT /v1/cache/{hash
 
 ## Deploy
 
-Requires Node.js 24+, npm, an AWS account and deployment credentials. Alchemy v2 is in beta; dependencies and the lockfile are pinned.
+Requires Node.js 24+, npm, an AWS account and deployment credentials. CDK dependencies and the lockfile are pinned. The dedicated CDK `cloudfront.experimental.EdgeFunction` construct manages Lambda@Edge functions and published versions; that construct is still in CDK’s experimental namespace.
 
 ```sh
 npm ci
@@ -26,11 +26,13 @@ export AWS_REGION=us-east-1
 export AWS_PROFILE=your-profile
 aws sso login --profile "$AWS_PROFILE" # if using SSO
 npm run build
+# Once per AWS account/region; replace YOUR_ACCOUNT_ID:
+npm run bootstrap -- aws://YOUR_ACCOUNT_ID/us-east-1
 npm run plan
 npm run deploy
 ```
 
-Alchemy manages an `AWS.CloudFormation.Stack` containing the bucket, OAC, distribution, execution role and versioned edge functions. This uses Alchemy's built-in AWS provider rather than shelling out to deploy CloudFormation. The stack is intentionally in **us-east-1**, as required by Lambda@Edge. CloudFront is global; the bucket is in us-east-1 too. First deployment and updates can take several minutes to propagate.
+The CDK app uses native `Bucket`, `Distribution`, `S3BucketOrigin.withOriginAccessControl` and `EdgeFunction` constructs. CDK synthesizes and deploys CloudFormation, including versioned edge associations and separate execution roles for signing downloads and handling upload responses. The stack is intentionally in **us-east-1**, as required by Lambda@Edge. CloudFront is global; the bucket is in us-east-1 too. First deployment and updates can take several minutes to propagate.
 
 `configure` creates two gitignored files with mode `0600`:
 
@@ -39,7 +41,9 @@ Alchemy manages an `AWS.CloudFormation.Stack` containing the bucket, OAC, distri
 
 The command refuses to overwrite existing files. Read the token file locally to configure your secret manager. The deployment credentials need CloudFormation, S3, CloudFront, IAM and Lambda permissions, including `iam:PassRole` and Lambda@Edge replication/service-linked-role permissions. They are deployment credentials, never credentials used by Nx clients.
 
-Alchemy state is local in `.alchemy/`. Preserve it securely between deployments, or explicitly configure an Alchemy shared state store before deploying from different machines. The included GitHub workflow runs checks only; it does not deploy or require AWS credentials.
+CloudFormation holds deployment state in AWS. `cdk.out/` contains generated templates and assembly files and is gitignored. The included GitHub workflow runs checks and synthesizes the stack offline; it does not deploy or require AWS credentials. `npm run synth` emits the CDK assembly; `npm run build` also writes a standalone template to `dist/cloudformation.json`.
+
+Earlier Alchemy deployments are not automatically adopted by this CDK app. If you deployed that version, preserve its `.alchemy/` state, deploy the CDK stack separately, switch Nx to the new endpoint, and retire the old deployment using its original configuration.
 
 ## Connect Nx
 
@@ -74,7 +78,7 @@ Example `cache.config.json` shape (replace digests with hashes of independently 
 }
 ```
 
-Each repository must have unique tokens and a unique namespace. The authenticated token selects the namespace; a caller cannot choose another namespace in the URL. Objects are stored at `cache/{namespace}/{hash}`. More repositories enlarge the inline CloudFormation template; the build rejects templates above 51,200 bytes.
+Each repository must have unique tokens and a unique namespace. The authenticated token selects the namespace; a caller cannot choose another namespace in the URL. Objects are stored at `cache/{namespace}/{hash}`. More repositories enlarge the embedded function configuration. CDK handles CloudFormation template publishing; AWS template and Lambda code-size quotas still apply.
 
 Uploads require `Content-Length`, as specified by Nx. The default artifact limit is 1 GiB and is configurable up to 5,000,000,000 bytes, below S3's single-PUT ceiling. The service does not implement multipart uploads or resumable transfers. API Gateway's 10 MB limit does not apply. A stock Nx client may buffer archives locally even though the service does not.
 
@@ -85,7 +89,7 @@ For token rotation, generate a fresh random token, compute its SHA-256 digest an
 1. A viewer-request Lambda@Edge checks authentication, the exact cache path, method and upload size. `IncludeBody` is **false**.
 2. A `GET` is signed locally and answered with `302`, `Location` and `Cache-Control: no-store`. No S3 HEAD request is needed. S3 returns `404` for a missing artifact, which Nx treats as a cache miss. The signing role has `ListBucket` solely so S3 can distinguish missing objects from inaccessible ones; there is no listing endpoint.
 3. A trusted `PUT` is rewritten to the authenticated repository's object key. The handler removes client-supplied S3 controls and bearer authorization, then sets `If-None-Match: *` and `x-amz-content-sha256: UNSIGNED-PAYLOAD`. CloudFront's OAC signs the origin request over HTTPS.
-4. The bucket policy allows that distribution to perform conditional `PutObject` only. S3 rejects an existing key atomically. A small origin-response Lambda@Edge converts S3's `412` to Nx's `409`. Neither edge function reads an artifact body.
+4. The OAC bucket policy grants that distribution `PutObject`; an explicit bucket-policy deny rejects any cache write without `If-None-Match: *`, including writes allowed through another IAM policy. S3 rejects an existing key atomically. A small origin-response Lambda@Edge converts S3's `412` to Nx's `409`. Neither edge function reads an artifact body.
 
 Only authenticated GET and PUT operations are offered. Query parameters, encoded paths, arbitrary keys and other methods are rejected. There is no public bucket access, artifact recompression, database, VPC, NAT Gateway or always-running compute. SSE-S3 encryption avoids per-request KMS charges.
 
@@ -119,7 +123,7 @@ export AWS_REGION=us-east-1
 npm run destroy
 ```
 
-The distribution, OAC and bucket policy are removed. **The bucket, edge functions, published versions and execution role are deliberately retained**, because cache data should not be silently deleted and AWS does not allow deleting Lambda@Edge versions while replicas exist. Function CloudWatch logs may also remain in execution regions. After detaching the distribution and waiting for replicas to disappear, remove these resources manually if desired. Save deployment outputs before destroying. Retained buckets incur storage charges until empty or deleted; their lifecycle rules continue expiring artifacts. Recreating a stack creates new resources rather than adopting the retained ones.
+The distribution, OAC and bucket policy are removed. **The bucket, edge functions, published versions, execution roles and their inline IAM policies are deliberately retained**, because cache data should not be silently deleted and AWS does not allow deleting Lambda@Edge versions while replicas exist. Function CloudWatch logs may also remain in execution regions. After detaching the distribution and waiting for replicas to disappear, remove these resources manually if desired. Save deployment outputs before destroying. Retained buckets incur storage charges until empty or deleted; their lifecycle rules continue expiring artifacts. Recreating a stack creates new resources rather than adopting the retained ones.
 
 ## References
 
@@ -127,6 +131,7 @@ The distribution, OAC and bucket policy are removed. **The bucket, edge function
 - [CloudFront S3 origins and PUT forwarding](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorS3Origin.html)
 - [CloudFront origin access control](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
 - [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
+- [CDK EdgeFunction construct](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_cloudfront.experimental.EdgeFunction.html)
 - [Lambda@Edge restrictions](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/lambda-at-edge-function-restrictions.html)
 
 ## License

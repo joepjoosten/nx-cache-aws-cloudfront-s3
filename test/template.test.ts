@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createContext, runInContext } from "node:vm";
 import { test } from "node:test";
+import { Match, Template } from "aws-cdk-lib/assertions";
 import { parseConfig } from "../src/config.ts";
-import { buildTemplate } from "../src/infra/template.ts";
+import { createCacheApp } from "../src/infra/app.ts";
 
 const config = parseConfig({
   repositories: [
@@ -13,50 +14,100 @@ const config = parseConfig({
     },
   ],
 });
-test("deployable bundles and template keep all artifact bodies outside Lambda", async () => {
-  const template = await buildTemplate(config);
-  const resources = template.Resources;
-  assert.ok(Buffer.byteLength(JSON.stringify(template)) < 51_200);
-  assert.ok(
-    !Object.values(resources).some((resource) =>
-      /ApiGateway/.test(resource.Type),
-    ),
+async function synth(ttl = config.signedUrlTtlSeconds) {
+  const { stack } = await createCacheApp(
+    { ...config, signedUrlTtlSeconds: ttl },
+    { account: "111111111111" },
   );
-  const distribution = resources.Distribution.Properties!
-    .DistributionConfig as any;
-  assert.equal(
-    distribution.DefaultCacheBehavior.LambdaFunctionAssociations[0].IncludeBody,
-    false,
-  );
-  assert.equal(
-    distribution.Origins[0].OriginAccessControlId.Ref,
-    "OriginAccessControl",
-  );
-  const policy = resources.BucketPolicy.Properties!.PolicyDocument as any;
-  assert.equal(
-    policy.Statement[0].Condition.StringEquals["s3:if-none-match"],
-    "*",
-  );
-  assert.equal(resources.CacheBucket.DeletionPolicy, "Retain");
-  for (const resource of Object.values(resources).filter(
-    (resource) => resource.Type === "AWS::Lambda::Function",
-  )) {
-    assert.equal(resource.Properties!.Environment, undefined);
-    assert.equal((resource.Properties!.Architectures as string[])[0], "x86_64");
+  return Template.fromStack(stack);
+}
+
+test("native CDK edge constructs keep artifact bodies outside Lambda and enforce conditional S3 writes", async () => {
+  const template = await synth();
+  template.resourceCountIs("AWS::Lambda::Function", 2);
+  template.resourceCountIs("AWS::Lambda::Version", 2);
+  template.resourceCountIs("AWS::ApiGateway::RestApi", 0);
+  template.hasResourceProperties("AWS::CloudFront::Distribution", {
+    DistributionConfig: {
+      DefaultCacheBehavior: {
+        CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+        LambdaFunctionAssociations: Match.arrayWith([
+          Match.objectLike({ EventType: "viewer-request", IncludeBody: false }),
+          Match.objectLike({
+            EventType: "origin-response",
+            IncludeBody: false,
+          }),
+        ]),
+      },
+      Origins: Match.arrayWith([
+        Match.objectLike({ OriginAccessControlId: Match.anyValue() }),
+      ]),
+    },
+  });
+  template.hasResourceProperties("AWS::CloudFront::OriginAccessControl", {
+    OriginAccessControlConfig: {
+      OriginAccessControlOriginType: "s3",
+      SigningBehavior: "always",
+      SigningProtocol: "sigv4",
+    },
+  });
+  template.hasResourceProperties("AWS::S3::BucketPolicy", {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Sid: "RequireWriteOnce",
+          Effect: "Deny",
+          Action: "s3:PutObject",
+          Condition: { StringNotEquals: { "s3:if-none-match": "*" } },
+        }),
+        Match.objectLike({
+          Effect: "Allow",
+          Principal: { Service: "cloudfront.amazonaws.com" },
+          Action: "s3:PutObject",
+          Condition: { StringEquals: { "AWS:SourceArn": Match.anyValue() } },
+        }),
+      ]),
+    },
+  });
+  template.hasResource("AWS::S3::Bucket", {
+    DeletionPolicy: "Retain",
+    Properties: {
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        IgnorePublicAcls: true,
+        BlockPublicPolicy: true,
+        RestrictPublicBuckets: true,
+      },
+    },
+  });
+  const functions = template.findResources("AWS::Lambda::Function");
+  for (const resource of Object.values(functions)) {
+    assert.equal(resource.Properties.Environment, undefined);
+    assert.equal(resource.Properties.Architectures?.[0] ?? "x86_64", "x86_64");
+    assert.equal(resource.Properties.Timeout, 5);
+    assert.equal(resource.DeletionPolicy, "Retain");
   }
-  const code = resources.ViewerFunction.Properties!.Code as any;
-  const parts = code.ZipFile["Fn::Join"][1];
-  const viewerSource = parts[0] + "test-bucket" + parts[2];
+  // CDK's EdgeFunction supplies the composite trust policy required by AWS.
+  for (const role of Object.values(template.findResources("AWS::IAM::Role"))) {
+    const principals = JSON.stringify(role.Properties.AssumeRolePolicyDocument);
+    assert.ok(principals.includes("edgelambda.amazonaws.com"));
+    assert.ok(principals.includes("lambda.amazonaws.com"));
+  }
+  const viewer = Object.entries(functions).find(([id]) =>
+    id.startsWith("ViewerFunction"),
+  )![1];
+  const parts = viewer.Properties.Code.ZipFile["Fn::Join"][1];
+  const source = parts
+    .map((part: unknown) => (typeof part === "string" ? part : "test-bucket"))
+    .join("");
   const module = { exports: {} as { handler: Function } };
-  const required: string[] = [];
   runInContext(
-    viewerSource,
+    source,
     createContext({
       module,
       exports: module.exports,
       Buffer,
       require: (name: string) => {
-        required.push(name);
         if (name === "node:crypto")
           return { createHash() {}, timingSafeEqual() {} };
         if (name === "@aws-sdk/client-s3")
@@ -68,16 +119,23 @@ test("deployable bundles and template keep all artifact bodies outside Lambda", 
     }),
   );
   assert.equal(typeof module.exports.handler, "function");
-  assert.ok(required.includes("@aws-sdk/client-s3"));
-  const changed = await buildTemplate({ ...config, signedUrlTtlSeconds: 600 });
-  assert.notDeepEqual(
-    Object.keys(resources).filter((key) => key.startsWith("ViewerVersion")),
-    Object.keys(changed.Resources).filter((key) =>
-      key.startsWith("ViewerVersion"),
-    ),
-  );
+});
+
+test("CDK publishes a new viewer version for config changes without replacing the function", async () => {
+  const before = await synth();
+  const after = await synth(600);
+  const viewerVersions = (template: Template) =>
+    Object.keys(template.findResources("AWS::Lambda::Version")).filter((id) =>
+      id.startsWith("ViewerFunction"),
+    );
+  const responseVersions = (template: Template) =>
+    Object.keys(template.findResources("AWS::Lambda::Version")).filter((id) =>
+      id.startsWith("ResponseFunction"),
+    );
+  assert.notDeepEqual(viewerVersions(before), viewerVersions(after));
+  assert.deepEqual(responseVersions(before), responseVersions(after));
   assert.deepEqual(
-    Object.keys(resources).filter((key) => key.endsWith("Function")),
-    Object.keys(changed.Resources).filter((key) => key.endsWith("Function")),
+    Object.keys(before.findResources("AWS::Lambda::Function")),
+    Object.keys(after.findResources("AWS::Lambda::Function")),
   );
 });

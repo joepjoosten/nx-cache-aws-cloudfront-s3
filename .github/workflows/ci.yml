@@ -15,10 +15,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Build deployment template with throwaway tokens
+      - name: Synthesize CDK deployment with throwaway tokens
         run: |
           npm run configure -- ci-fixture
           npm run build
+          npm run synth -- --quiet --no-lookups
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"

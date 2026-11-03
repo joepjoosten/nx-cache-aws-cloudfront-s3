@@ -9,10 +9,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": [
-    "alchemy.run.ts",
-    "src/**/*.ts",
-    "scripts/**/*.ts",
-    "test/**/*.ts"
-  ]
+  "include": ["cdk.ts", "src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .alchemy/
+cdk.out/
 .env
 .env.*
 !.env.example

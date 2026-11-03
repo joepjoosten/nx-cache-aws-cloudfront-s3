@@ -3,7 +3,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { EdgeConfig } from "../config.ts";
 import { createViewerHandler } from "./viewer.ts";
 
-// Substituted by esbuild; only token hashes are embedded, never bearer tokens.
+// Substituted by esbuild/CDK; only token hashes are embedded, never bearer tokens.
 declare const __EDGE_CONFIG__: EdgeConfig;
 const config = __EDGE_CONFIG__;
 const s3 = new S3Client({ region: config.region, maxAttempts: 1 });

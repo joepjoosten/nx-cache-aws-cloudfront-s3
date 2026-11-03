@@ -1,8 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { loadConfig } from "../src/config.ts";
-import { buildTemplate } from "../src/infra/template.ts";
+import { createCacheApp } from "../src/infra/app.ts";
 
-const template = await buildTemplate(loadConfig());
+const { app, stack } = await createCacheApp(loadConfig());
+const template = app.synth().getStackArtifact(stack.artifactId).template;
 await mkdir("dist", { recursive: true });
 await writeFile(
   "dist/cloudformation.json",

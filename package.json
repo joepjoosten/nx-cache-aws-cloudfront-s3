@@ -1,25 +1,27 @@
 {
   "name": "nx-cache-aws-cloudfront-s3",
   "version": "0.1.0",
-  "description": "Serverless Nx remote cache on AWS: CloudFront uploads and direct S3 downloads, deployed with Alchemy.",
+  "description": "Serverless Nx remote cache on AWS: CloudFront uploads and direct S3 downloads, deployed with AWS CDK.",
   "scripts": {
     "test": "tsx --test test/*.test.ts",
     "configure": "tsx scripts/configure.ts",
     "build": "tsx scripts/build.ts",
     "typecheck": "tsc --noEmit",
-    "deploy": "alchemy deploy",
-    "plan": "alchemy plan",
-    "destroy": "alchemy destroy",
+    "deploy": "cdk deploy",
+    "plan": "cdk diff",
+    "destroy": "cdk destroy",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "smoke": "tsx scripts/smoke.ts",
-    "check": "npm run typecheck && npm test && npm run format:check"
+    "check": "npm run typecheck && npm test && npm run format:check",
+    "synth": "cdk synth",
+    "bootstrap": "cdk bootstrap"
   },
   "keywords": [
     "nx",
     "remote-cache",
     "aws",
-    "alchemy",
+    "aws-cdk",
     "cloudfront",
     "s3"
   ],
@@ -27,16 +29,15 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "@alchemy.run/aws": "2.0.0-beta.85",
     "@aws-sdk/client-s3": "3.1161.0",
     "@aws-sdk/s3-request-presigner": "3.1161.0",
-    "@effect/platform-node": "4.1.2",
-    "alchemy": "2.0.0-beta.85",
-    "effect": "4.1.2"
+    "aws-cdk-lib": "2.275.0",
+    "constructs": "10.8.1"
   },
   "devDependencies": {
     "@types/aws-lambda": "8.10.164",
     "@types/node": "26.6.6",
+    "aws-cdk": "2.1147.0",
     "esbuild": "0.28.2",
     "nx": "24.0.3",
     "prettier": "3.9.10",
