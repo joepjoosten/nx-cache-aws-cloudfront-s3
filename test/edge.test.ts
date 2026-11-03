@@ -74,18 +74,36 @@ function event(
 }
 const response = (value: unknown) => value as CloudFrontResultResponse;
 
-test("rejects absent, malformed, duplicate and wrong bearer tokens", async () => {
+test("invalid GET credentials return 403 and invalid PUT credentials return 401 as plain text", async () => {
   const handler = createViewerHandler(config, async () => {
     throw new Error("must not sign");
   });
-  for (const token of [null, "wrong".repeat(12), "short"]) {
-    assert.equal(response(await handler(event("GET", token))).status, "401");
+  for (const [method, status] of [
+    ["GET", "403"],
+    ["PUT", "401"],
+  ]) {
+    const inputs = [null, "wrong".repeat(12), "short"].map((token) =>
+      event(method, token),
+    );
+    const duplicate = event(method);
+    duplicate.Records[0].cf.request.headers.authorization.push({
+      value: `Bearer ${writer}`,
+    });
+    const malformed = event(method);
+    malformed.Records[0].cf.request.headers.authorization = [
+      { value: `Basic ${writer}` },
+    ];
+    const empty = event(method);
+    empty.Records[0].cf.request.headers.authorization = [{ value: "Bearer " }];
+    for (const input of [...inputs, duplicate, malformed, empty]) {
+      const result = response(await handler(input));
+      assert.equal(result.status, status);
+      assert.equal(result.headers?.["content-type"][0].value, "text/plain");
+      assert.equal(result.headers?.["cache-control"][0].value, "no-store");
+      assert.equal(result.headers?.location, undefined);
+      assert.equal(result.body, "Missing or invalid authentication token");
+    }
   }
-  const duplicate = event();
-  duplicate.Records[0].cf.request.headers.authorization.push({
-    value: `Bearer ${writer}`,
-  });
-  assert.equal(response(await handler(duplicate)).status, "401");
 });
 
 test("GET signs a namespace-scoped URL without inspecting or fetching the body", async () => {

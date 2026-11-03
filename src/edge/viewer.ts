@@ -32,12 +32,15 @@ export function createViewerHandler(
     event: CloudFrontRequestEvent,
   ): Promise<CloudFrontRequest | CloudFrontResultResponse> => {
     const request = event.Records[0].cf.request;
+    // Nx specifies forbidden reads as 403, but missing/invalid upload
+    // credentials as 401. Apply this to malformed and unknown tokens alike.
+    const authFailureStatus = request.method === "GET" ? 403 : 401;
     const authorization = request.headers.authorization;
     if (
       authorization?.length !== 1 ||
       !/^Bearer [!-~]{32,512}$/.test(authorization[0].value)
     ) {
-      return text(401, "Missing or invalid authentication token");
+      return text(authFailureStatus, "Missing or invalid authentication token");
     }
     const digest = createHash("sha256")
       .update(authorization[0].value.slice(7))
@@ -52,7 +55,8 @@ export function createViewerHandler(
         canWrite = writer;
       }
     }
-    if (!namespace) return text(401, "Missing or invalid authentication token");
+    if (!namespace)
+      return text(authFailureStatus, "Missing or invalid authentication token");
     const match = /^\/v1\/cache\/([A-Za-z0-9_-]{1,255})$/.exec(request.uri);
     // Never forward arbitrary S3 operations, encoded paths, or query parameters.
     if (!match || request.querystring) return text(404, "Not found");

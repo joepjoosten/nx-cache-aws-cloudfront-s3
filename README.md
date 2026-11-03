@@ -57,6 +57,8 @@ npx nx run-many -t build
 
 Use the read/write token only in trusted build pipelines. Give untrusted PR jobs the read-only token, if they are allowed to read these artifacts. A read token can read **all artifacts in its repository namespace**. Never expose cache write credentials to untrusted code. Write-once behavior does not prevent a malicious writer from planting an entry first.
 
+Missing, malformed or unrecognized credentials return `403 text/plain` for GET and `401 text/plain` for PUT, matching Nx's specified authentication responses. A recognized read-only token attempting a PUT returns `403 text/plain`. These failures never issue a download redirect. After a successful redirect, S3 itself handles download errors; an expired presigned URL or a storage authorization failure uses S3's native error format.
+
 The Nx 24.0.3 native HTTP client follows redirects and strips the bearer token when redirecting across hosts; the automated transport test verifies this. Test other pinned Nx versions before use. The base URL has no trailing slash. No custom Nx task runner or AWS credentials are needed on clients. Nx Cloud configuration can affect remote-cache selection; verify the self-hosted endpoint is being used in your workspace.
 
 ## Configuration

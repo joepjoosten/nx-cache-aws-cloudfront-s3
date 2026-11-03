@@ -22,7 +22,22 @@ const headers = (token: string) => ({
 const request = (url: string, init?: RequestInit) =>
   fetch(url, { ...init, signal: AbortSignal.timeout(120_000) });
 
-assert.equal((await request(url)).status, 401);
+for (const [method, status] of [
+  ["GET", 403],
+  ["PUT", 401],
+] as const) {
+  for (const auth of [undefined, headers("invalid-token-".repeat(4))]) {
+    const result = await request(url, {
+      method,
+      headers: auth,
+      ...(method === "PUT" ? { body: payload } : {}),
+      redirect: "manual",
+    });
+    assert.equal(result.status, status);
+    assert.equal(result.headers.get("content-type"), "text/plain");
+    assert.equal(result.headers.get("location"), null);
+  }
+}
 assert.equal(
   (await request(url, { headers: headers(tokens.readOnlyToken) })).status,
   404,
